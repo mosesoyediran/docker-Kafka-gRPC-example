@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# docker-entrypoint-web  —  Kafka-only micro-service
+###############################################################################
+#  • Spins up the AIOKafkaProducer
+#  • Starts the ApiEventsConsumer loop
+#  • Blocks until the container receives SIGTERM / ^C
+###############################################################################
+
+echo "🐙  Starting Kafka runner..."
+# -u  = unbuffered stdout/stderr so logs appear immediately in `docker logs`
+exec python -u -m kafka.app

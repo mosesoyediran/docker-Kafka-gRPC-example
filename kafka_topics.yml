@@ -1,0 +1,12 @@
+default:
+  client_id: "kafka-default-agent"
+  topics:
+    events: "kafka-default.events"
+    metrics: "kafka-default.metrics"
+  group_id: "main-network"
+
+DLQ: # << new catalog key
+  client_id: "kafka-dlq-agent"
+  topics:
+    events: "kafka.dlq" # single partitioned DLQ topic
+  group_id: "dlq-network"

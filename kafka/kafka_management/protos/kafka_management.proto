@@ -1,0 +1,32 @@
+syntax = "proto3";
+package eventgateway;
+
+
+
+message PublishRequest {
+  string topic_key = 1;   // matches your settings.kafka_topics key ("EVENTS", etc.)
+  string key       = 2;   // Kafka key for partitioning (“wallet:123”)
+  bytes  payload   = 3;   // the JSON/Avro message bytes
+}
+
+message PublishResponse {
+  bool   ok      = 1;
+  string message = 2;    // error or “published”
+}
+
+message SubscribeRequest {
+  // list of logical topic keys to subscribe to, e.g. ["wallet","events"]
+  repeated string topic_keys = 1;
+}
+message EventEnvelope {
+  string topic = 1;           // actual Kafka topic name
+  string key   = 2;           // Kafka key
+  bytes  payload = 3;         // raw message
+  map<string,bytes> headers = 4; // optional headers
+}
+
+
+service EventGateway {
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  rpc Subscribe (SubscribeRequest) returns (stream EventEnvelope);
+}
