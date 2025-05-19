@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o pipefail
+
+DC="${DC:-exec}"
+
+TTY="${TTY:-}"
+if [[ ! -t 1 ]]; then
+  TTY="-T"
+fi
+
+# -----------------------------------------------------------------------------
+# Internal helpers
+# -----------------------------------------------------------------------------
+
+_dc() {
+  docker compose "${DC}" ${TTY} "${@}"
+}
+
+_dc_run() {
+  DC="run" _dc --no-deps --rm "${@}"
+}
+
+# -----------------------------------------------------------------------------
+# General Commands
+# -----------------------------------------------------------------------------
+
+db() {
+  cmd alembic "$@"
+}
+
+db:reset() {
+  db downgrade base
+  db upgrade head
+}
+
+cmd() {
+  _dc kafka-agent "${@}"
+}
+
+fastapi() {
+  if [[ "$1" = "db" && "$2" = "reset" ]]; then
+    shift 2
+    db:reset "$@"
+    return
+  fi
+
+  if [[ "$1" = "db" ]]; then
+    shift
+    db "$@"
+    return
+  fi
+
+  echo "No such fastapi sub-command: $*"
+  exit 1
+}
+
+lint:dockerfile() {
+  docker container run --rm -i \
+    -v "${PWD}/.hadolint.yaml:/.config/hadolint.yaml" \
+    hadolint/hadolint hadolint "${@}" - <Dockerfile
+}
+
+lint:shell() {
+  local cmd=(shellcheck)
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    local cmd=(docker container run --rm -i -v "${PWD}:/mnt" koalaman/shellcheck:stable)
+  fi
+
+  find . -type f \
+    ! -path "./.git/*" \
+    ! -path "./.ruff_cache/*" \
+    ! -path "./.pytest_cache/*" \
+    ! -path "./assets/*" \
+    ! -path "./public/*" \
+    -exec grep --quiet '^#!.*sh' {} \; -exec "${cmd[@]}" {} +
+}
+
+lint() {
+  cmd ruff check "${@}"
+}
+
+format:shell() {
+  local cmd=(shfmt)
+  if ! command -v shfmt >/dev/null 2>&1; then
+    local cmd=(docker container run --rm -i -v "${PWD}:/mnt" -u "$(id -u):$(id -g)" -w /mnt mvdan/shfmt:v3)
+  fi
+
+  local maybe_write=("--write")
+  for arg in "${@}"; do
+    if [ "${arg}" == "-d" ] || [ "${arg}" == "--diff" ]; then
+      unset "maybe_write[0]"
+    fi
+  done
+
+  "${cmd[@]}" "${maybe_write[@]}" "${@}" .
+}
+
+format() {
+  cmd ruff check --fix
+  cmd ruff format "${@}"
+}
+
+quality() {
+  lint:dockerfile
+  lint:shell
+  lint
+  format:shell
+  format
+}
+
+test() {
+  cmd pytest test/ "${@}"
+}
+
+test:coverage() {
+  cmd pytest --cov test/ --cov-report term-missing "${@}"
+}
+
+shell() {
+  cmd bash "${@}"
+}
+
+psql() {
+  . .env
+  _dc postgres psql -U "${POSTGRES_USER}" "${@}"
+}
+
+redis-cli() {
+  _dc redis redis-cli "${@}"
+}
+
+deps:install() {
+  local no_build="${1:-}"
+  [ -z "${no_build}" ] && docker compose down && docker compose build
+
+  _dc_run js yarn install
+  _dc_run kafka1 bin/uv-install
+}
+
+uv() {
+  cmd uv "${@}"
+}
+
+uv:outdated() {
+  _dc_run kafka1 uv tree --outdated --depth 1 "${@}"
+}
+
+yarn() {
+  _dc js yarn "${@}"
+}
+
+yarn:outdated() {
+  _dc_run js yarn outdated
+}
+
+yarn:build:js() {
+  mkdir -p ../public/js
+  node esbuild.config.mjs
+}
+
+yarn:build:css() {
+  local args=()
+  if [ "${NODE_ENV:-}" == "production" ]; then
+    args=(--minify)
+  else
+    args=(--watch)
+  fi
+
+  mkdir -p ../public/css
+  tailwindcss -i css/app.css -o ../public/css/app.css "${args[@]}"
+}
+
+clean() {
+  rm -rf public/*.* public/js public/css public/images public/fonts \
+    .ruff_cache/ .pytest_cache/ .coverage celerybeat-schedule
+  touch public/.keep
+}
+
+ci:install-deps() {
+  sudo apt-get install -y curl
+  sudo curl \
+    -L https://raw.githubusercontent.com/nickjj/wait-until/v0.2.0/wait-until \
+    -o /usr/local/bin/wait-until && sudo chmod +x /usr/local/bin/wait-until
+}
+
+ci:test() {
+  lint:dockerfile "${@}"
+  lint:shell
+  format:shell --diff
+
+  cp --no-clobber .env.example .env
+
+  docker compose build
+  docker compose up -d
+
+  . .env
+  wait-until "docker compose exec -T \
+    -e PGPASSWORD=${POSTGRES_PASSWORD} postgres \
+    psql -U ${POSTGRES_USER} ${POSTGRES_USER} -c 'SELECT 1'"
+
+  docker compose logs
+
+  lint "${@}"
+  format --check --diff
+  fastapi db reset --with-testdb
+  test "${@}"
+}
+
+# ─────────────────────── Custom Kafka Commands ───────────────────────
+
+grpc:serve() {
+  # Run the gRPC server
+  cmd python -m kafka.app
+}
+
+proto:build() {
+  # Compile gRPC proto files
+  docker build -f proto-builder.Dockerfile -t proto-builder .
+  docker run --rm -v "$(pwd)/kafka/kafka_management/generated:/out" proto-builder
+}
+
+kafka:test() {
+  # Run smoke test to publish a Kafka event
+  cmd python kafka/smoke_test.py
+}
+
+dlq:watch() {
+  # Tail DLQ topic messages
+  cmd python -m kafka.dlq_watch
+}
+
+help() {
+  printf "%s <task> [args]\n\nTasks:\n" "${0}"
+  compgen -A function | grep -v "^_" | cat -n
+  printf "\nExtended help:\n  Each task has comments for general usage\n"
+}
+
+TIMEFORMAT=$'\nTask completed in %3lR'
+time "${@:-help}"
